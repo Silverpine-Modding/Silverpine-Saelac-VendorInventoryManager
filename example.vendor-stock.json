@@ -1,0 +1,49 @@
+{
+  "version": 4,
+  "packs": [
+    {
+      "id": "default",
+      "name": "Default",
+      "enabled": true,
+      "vendors": [
+        {
+          "vendorId": "base:Aldric",
+          "items": [
+            {
+              "itemName": "Iron Sword",
+              "quantity": 2,
+              "quality": "Superior"
+            }
+          ],
+          "automaticStockExclusions": [
+            "Simple Bed"
+          ],
+          "randomPools": []
+        },
+        {
+          "vendorId": "custom:Example Merchant",
+          "items": [],
+          "automaticStockExclusions": [],
+          "randomPools": [
+            {
+              "id": "random-1",
+              "enabled": true,
+              "source": "Pack:example-pack",
+              "category": "Weapon",
+              "pickupable": "Any",
+              "quality": "Exceptional",
+              "nameContains": "",
+              "nameExcludes": "Spoiled",
+              "minValue": 1,
+              "maxValue": 100,
+              "minQuantity": 2,
+              "maxQuantity": 5,
+              "chancePercent": 75.0,
+              "allowDuplicates": false
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

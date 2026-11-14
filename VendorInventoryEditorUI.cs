@@ -439,8 +439,10 @@ internal sealed class VendorInventoryEditorUI : ModToolBehaviour
                 ref randomPoolsExpanded))
         {
             GUILayout.Label(
-                "Pools roll after daily restock. Custom vendors also roll " +
-                "when their vendor NPC is first registered.");
+                "Each pool has a separate stock target. Fixed stock and " +
+                "items allocated to another pool do not fill its target. " +
+                "Rolls run on Save + Apply, daily restock, and custom " +
+                "vendor registration.");
             foreach (VendorRandomStockRule pool in randomPools)
                 DrawRandomPool(vendor, rule!, pool);
             if (GUILayout.Button("+ Add random stock pool"))

@@ -25,7 +25,7 @@ public sealed class Plugin : BaseUnityPlugin
     public const string PluginGuid =
         "renegadex.silverpine.vendorinventorymanager";
     public const string PluginName = "Vendor Inventory Manager";
-    public const string PluginVersion = "1.4.2";
+    public const string PluginVersion = "1.4.3";
 
     internal static ManualLogSource Log = null!;
     internal static string ConfigDirectory = "";
@@ -777,8 +777,6 @@ internal static class VendorStockService
 {
     private static readonly HashSet<string> MissingItemsLogged =
         new(StringComparer.OrdinalIgnoreCase);
-    private static readonly HashSet<string> EmptyPoolsLogged =
-        new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> PredicateFailuresLogged =
         new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> UnsupportedQualityLogged =
@@ -794,6 +792,15 @@ internal static class VendorStockService
 
         internal Item Template { get; }
         internal Quality? Quality { get; }
+    }
+
+    private sealed class RandomPoolRoll
+    {
+        internal VendorRandomStockRule Pool = null!;
+        internal List<Item> Candidates = null!;
+        internal Quality? Quality;
+        internal int Target;
+        internal int AllocationIndex;
     }
 
     [ThreadStatic]
@@ -882,9 +889,11 @@ internal static class VendorStockService
         CollectRandomStock(
             inventory,
             vendorId,
+            effectiveStock,
             randomPools,
             exclusions,
-            requestedStock);
+            requestedStock,
+            reason);
 
         bool originalAllowEncumbered = inventory.allowEncumbered;
         int originalMaxItems = inventory.maxItems;
@@ -1083,16 +1092,48 @@ internal static class VendorStockService
     private static void CollectRandomStock(
         Inventory inventory,
         string vendorId,
+        IReadOnlyList<VendorStockEntry> fixedEntries,
         IEnumerable<VendorRandomStockRule> pools,
         HashSet<string> exclusions,
-        ICollection<RequestedStock> requestedStock)
+        ICollection<RequestedStock> requestedStock,
+        string reason)
     {
+        // Allocate only stock already in the inventory. Pending fixed items
+        // and picks made by another random pool cannot satisfy this pool.
+        List<Item> existingStock = inventory.items.Where(item =>
+            item != null &&
+            item.GetItemComponent<ItemComponent_VendorItem>() != null).ToList();
+        var targets = new List<int>();
+        var eligibleItems = new List<bool[]>();
+        foreach (VendorStockEntry entry in fixedEntries)
+        {
+            Item? template = ItemLibrary.Items.FirstOrDefault(item =>
+                item != null && item.name.Equals(
+                    entry.itemName, StringComparison.OrdinalIgnoreCase));
+            if (template == null)
+                continue;
+            Quality? quality = ParseQualityOverride(entry.quality);
+            if (quality.HasValue && !TryGetItemQuality(template, out _))
+                quality = null;
+
+            targets.Add(entry.quantity);
+            eligibleItems.Add(existingStock.Select(item =>
+                item.name.Equals(entry.itemName, StringComparison.OrdinalIgnoreCase) &&
+                ItemMatchesQuality(item, quality)).ToArray());
+        }
+
+        var rolls = new List<RandomPoolRoll>();
         foreach (VendorRandomStockRule pool in pools)
         {
             if (pool.chancePercent <= 0f ||
                 (pool.chancePercent < 100f &&
                  UnityEngine.Random.value * 100f >= pool.chancePercent))
+            {
+                Plugin.Log.LogInfo(
+                    $"Random stock pool '{pool.id}' for '{vendorId}' after " +
+                    $"{reason}: chance roll skipped ({pool.chancePercent:0.##}%).");
                 continue;
+            }
 
             List<Item> candidates = ItemLibrary.Items
                 .Where(item => ItemMatchesRandomPool(item, pool, exclusions))
@@ -1101,11 +1142,11 @@ internal static class VendorStockService
                 .ToList();
             if (candidates.Count == 0)
             {
-                string emptyKey = vendorId + "|" + pool.id;
-                if (EmptyPoolsLogged.Add(emptyKey))
-                    Plugin.Log.LogWarning(
-                        $"Random stock pool '{pool.id}' for '{vendorId}' " +
-                        "matches no registered items.");
+                Plugin.Log.LogWarning(
+                    $"Random stock pool '{pool.id}' for '{vendorId}' after " +
+                    $"{reason} matches no registered items " +
+                    $"(source: {pool.source}, category: {pool.category}, " +
+                    $"quality: {pool.quality}).");
                 continue;
             }
 
@@ -1113,18 +1154,30 @@ internal static class VendorStockService
                 pool.minQuantity,
                 pool.maxQuantity + 1);
             Quality? quality = ParseQualityOverride(pool.quality);
-            int existing = inventory.items.Count(item =>
-                item != null &&
-                item.GetItemComponent<ItemComponent_VendorItem>() != null &&
+            rolls.Add(new RandomPoolRoll
+            {
+                Pool = pool,
+                Candidates = candidates,
+                Quality = quality,
+                Target = target,
+                AllocationIndex = targets.Count
+            });
+            targets.Add(target);
+            eligibleItems.Add(existingStock.Select(item =>
                 ItemMatchesRandomPool(item, pool, exclusions) &&
-                ItemMatchesQuality(item, quality)) +
-                requestedStock.Count(request =>
-                    ItemMatchesRandomPool(
-                        request.Template,
-                        pool,
-                        exclusions) &&
-                    RequestedStockMatchesQuality(request, quality));
-            int needed = Mathf.Max(0, target - existing);
+                ItemMatchesQuality(item, quality)).ToArray());
+        }
+
+        // Each item can satisfy just one minimum. Reassigning compatible
+        // items prevents a broad pool from taking the only Legendary item
+        // needed by a later pool when another item could serve the broad one.
+        int[] allocations = StockAllocation.Allocate(targets, eligibleItems);
+        foreach (RandomPoolRoll roll in rolls)
+        {
+            VendorRandomStockRule pool = roll.Pool;
+            List<Item> candidates = roll.Candidates;
+            int existing = allocations[roll.AllocationIndex];
+            int needed = roll.Target - existing;
             if (!pool.allowDuplicates)
             {
                 var existingNames = inventory.items
@@ -1136,6 +1189,7 @@ internal static class VendorStockService
                 candidates.RemoveAll(item => existingNames.Contains(item.name));
             }
 
+            int queued = 0;
             for (int index = 0; index < needed && candidates.Count > 0; index++)
             {
                 int candidateIndex = UnityEngine.Random.Range(
@@ -1143,10 +1197,21 @@ internal static class VendorStockService
                     candidates.Count);
                 requestedStock.Add(new RequestedStock(
                     candidates[candidateIndex],
-                    quality));
+                    roll.Quality));
+                queued++;
                 if (!pool.allowDuplicates)
                     candidates.RemoveAt(candidateIndex);
             }
+
+            Plugin.Log.LogInfo(
+                $"Random stock pool '{pool.id}' for '{vendorId}' after " +
+                $"{reason}: target {roll.Target}, existing stock allocated " +
+                $"{existing}, queued {queued} (quality: {pool.quality}).");
+            if (queued < needed)
+                Plugin.Log.LogWarning(
+                    $"Random stock pool '{pool.id}' for '{vendorId}' is " +
+                    $"short by {needed - queued} item(s): no more candidates " +
+                    "remain after duplicate-name restrictions.");
         }
     }
 
@@ -1243,18 +1308,6 @@ internal static class VendorStockService
         !quality.HasValue ||
         (TryGetItemQuality(item, out Quality actual) &&
          actual == quality.Value);
-
-    private static bool RequestedStockMatchesQuality(
-        RequestedStock request,
-        Quality? quality)
-    {
-        if (!quality.HasValue)
-            return true;
-        if (request.Quality.HasValue)
-            return request.Quality.Value == quality.Value;
-        return TryGetItemQuality(request.Template, out Quality actual) &&
-               actual == quality.Value;
-    }
 
     internal static bool TryGetCustomPackId(Item? item, out string packId)
     {

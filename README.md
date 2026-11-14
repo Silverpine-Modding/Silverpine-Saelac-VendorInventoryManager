@@ -174,11 +174,25 @@ predicate-based stock generation.
 
 ### Random stock pools
 
-Each enabled pool rolls independently after the vendor's normal daily restock.
-Custom vendors also receive a roll when their vendor NPC is first registered.
-A pool chooses a target between `minQuantity` and `maxQuantity`; existing
-vendor-tagged items matching that pool count toward the target. This keeps
-repeated custom-NPC registration from multiplying stock without limit.
+Each enabled pool rolls independently after the vendor's normal daily restock
+and on `Save + Apply`. Custom vendors also receive a roll when their vendor NPC
+is first registered. A pool chooses a target between `minQuantity` and
+`maxQuantity`.
+
+Each existing vendor-tagged item can count toward only one target. Fixed stock
+is reserved first, then the remaining items are assigned to random pools.
+Pending fixed stock and new selections from other pools cannot fill a pool's
+target. Overlapping filters therefore keep separate quantities: five pools
+with 100% chance and quantity 1 need five items in addition to fixed stock,
+provided their filters and duplicate restrictions permit it. Reapplying the
+same rules reuses those allocations rather than adding five more items every
+time. Existing native vendor stock can fill random targets when it is not
+needed by fixed stock.
+
+Each roll logs its target, existing allocation, and queued quantity. Failed
+chance rolls, empty candidate filters, and shortages caused by duplicate-name
+restrictions are reported separately. Clone or insertion failures are also
+logged with the affected item name.
 
 Available filters are:
 
@@ -199,7 +213,7 @@ Available filters are:
   filling the target.
 
 Random pools never select names excluded from automatic stock. A pool with no
-matching registered items is skipped and reported once in the BepInEx log.
+matching registered items is skipped and reported in the BepInEx log.
 
 The NPC's existing vendor routine still controls when trading is active.
 Adding stock does not make a non-vendor NPC trade.
